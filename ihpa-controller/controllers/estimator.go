@@ -330,7 +330,11 @@ estimatorLoop:
 					break
 				}
 			}
-			waitTime = time.Duration(data[position].EstimateUnixTime - now)
+			if len(data) > 0 {
+				waitTime = time.Duration(data[position].EstimateUnixTime - now)
+			} else {
+				waitTime = time.Duration(5)
+			}
 		default:
 		}
 
