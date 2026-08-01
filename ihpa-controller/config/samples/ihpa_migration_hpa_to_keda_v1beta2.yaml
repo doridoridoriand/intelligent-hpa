@@ -1,0 +1,63 @@
+---
+apiVersion: ihpa.ake.cyberagent.co.jp/v1beta2
+kind: IntelligentHorizontalPodAutoscaler
+metadata:
+  name: nginx
+spec:
+  scaleBackend:
+    type: KEDA
+    keda:
+      annotations:
+        scaledobject.keda.sh/transfer-hpa-ownership: "true"
+      pollingInterval: 30
+      cooldownPeriod: 300
+      advanced:
+        horizontalPodAutoscalerConfig:
+          name: ihpa-nginx
+      triggers:
+      - type: prometheus
+        name: current-requests
+        metricType: AverageValue
+        metadata:
+          serverAddress: http://prometheus-server.monitoring.svc:9090
+          query: sum(nginx_net_request_per_s{kube_namespace="loadtest",kube_deployment="nginx"})
+          threshold: "10"
+      - type: prometheus
+        name: forecasted-requests
+        metricType: AverageValue
+        metadata:
+          serverAddress: http://prometheus-server.monitoring.svc:9090
+          query: sum(ake_ihpa_forecasted_nginx_net_request_per_s{kube_system_uid="xxx",kube_namespace="loadtest",kube_deployment="nginx"})
+          threshold: "10"
+  estimator:
+    gapMinutes: 10
+    mode: adjust
+  metricProvider:
+    name: prometheus
+    aggregation: sum
+    prometheus:
+      url: http://prometheus-server.monitoring.svc:9090
+      pushgatewayUrl: http://prometheus-pushgateway.monitoring.svc:9091
+  template:
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: nginx
+      minReplicas: 1
+      maxReplicas: 5
+      metrics:
+      - type: External
+        external:
+          metric:
+            name: nginx_net_request_per_s
+            selector:
+              matchLabels:
+                kube_namespace: loadtest
+                kube_deployment: nginx
+          target:
+            type: AverageValue
+            averageValue: "10"
+        fittingJob:
+          seasonality: daily
+          executeOn: 4

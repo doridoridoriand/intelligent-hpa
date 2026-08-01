@@ -1,0 +1,40 @@
+---
+apiVersion: ihpa.ake.cyberagent.co.jp/v1beta2
+kind: IntelligentHorizontalPodAutoscaler
+metadata:
+  name: nginx-hpa
+spec:
+  scaleBackend:
+    type: HPA
+  estimator:
+    gapMinutes: 10
+    mode: adjust
+  metricProvider:
+    name: prometheus
+    aggregation: sum
+    prometheus:
+      url: http://prometheus-server.monitoring.svc:9090
+      pushgatewayUrl: http://prometheus-pushgateway.monitoring.svc:9091
+  template:
+    spec:
+      scaleTargetRef:
+        apiVersion: apps/v1
+        kind: Deployment
+        name: nginx
+      minReplicas: 1
+      maxReplicas: 5
+      metrics:
+      - type: External
+        external:
+          metric:
+            name: nginx_net_request_per_s
+            selector:
+              matchLabels:
+                kube_namespace: loadtest
+                kube_deployment: nginx
+          target:
+            type: AverageValue
+            averageValue: "10"
+        fittingJob:
+          seasonality: daily
+          executeOn: 4

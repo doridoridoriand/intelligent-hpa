@@ -121,6 +121,18 @@ spec:
 
 </details>
 
+### Scale Backend
+
+v1beta2 の IHPA は `spec.scaleBackend.type` でスケーリングバックエンドを選択できます。未指定時は従来通り `HPA` として扱われ、IHPA Controller が `HorizontalPodAutoscaler` を直接生成します。
+
+`KEDA` を指定すると、IHPA Controller は HPA の代わりに `keda.sh/v1alpha1` の `ScaledObject` を生成します。`template.spec.scaleTargetRef`, `minReplicas`, `maxReplicas` は ScaledObject の `scaleTargetRef`, `minReplicaCount`, `maxReplicaCount` に反映されます。KEDA の `envSourceContainerName`, `pollingInterval`, `cooldownPeriod`, `fallback`, `advanced`, `triggers` は `spec.scaleBackend.keda` に記述します。
+
+KEDA モードでも FittingJob と Estimator の生成は変わりません。つまり予測メトリクスはこれまで通り MetricProvider に送信されます。一方で、KEDA の trigger は scaler ごとに必要な認証・query・metadata が異なるため、IHPA は HPA の `metrics` から KEDA trigger を自動生成しません。KEDA モードで予測値もスケール判定に使う場合は、`scaleBackend.keda.triggers` に現在値用 trigger と予測値用 trigger の両方を記述してください。
+
+Prometheus の場合、Estimator は `.` を `_` に変換したメトリクス名を Pushgateway へ送信します。例えば `ake.ihpa.forecasted_nginx_net_request_per_s` は Prometheus 上では `ake_ihpa_forecasted_nginx_net_request_per_s` として参照します。Datadog の場合は `ake.ihpa.forecasted_nginx_net_request_per_s` のように `.` を含むメトリクス名をそのまま query に使用します。
+
+HPA から KEDA へ切り替える場合、Controller は IHPA が生成した HPA を削除してから ScaledObject を作成します。逆に KEDA から HPA へ戻す場合は ScaledObject を削除してから HPA を作成します。KEDA Operator は ScaledObject から別途 HPA を生成するため、`advanced.horizontalPodAutoscalerConfig.name` を使って KEDA 側の HPA 名を明示できます。
+
 少し内部的な話をするとラベルは完全な一意性を担保するために、指定されたラベルをコピーせずに IHPA 側で生成しています (Kubernetes クラスタの判別のために kube-system の UID を使っています)。また、Resource タイプは少し特殊で、External には Utilization という概念がない (min/max がわからないのでそうなります) ため、ターゲットのすべてのコンテナが持つ requests を計算して指定された Utilization に相当する値を設定しています。
 
 次にどのようにメトリクスが MetricProvider に送られるかを見ていきましょう。メトリクスの送信は EstimatorController が担当しています。この図はその Controller の流れを表したものです。スタートに位置する Reconciler は Estimator リソースを作ったり消したりするコンポーネントで Custom Controller の中枢的存在です。そのリソースが作成されると EstimatorHandler を通して Estimator という goroutine を生成します。EstimatorHandler は API 的にリクエストを受け付ける Channel の口を持っており、これを介して処理を行います。これによって作られた Estimator goroutine が ConfigMap を監視し、そこにデータが書き込まれると MetricProvider に送ります。厳密にはまとまったデータを読み込み、そのデータポイントの時刻になったら送信しています。これは Datadog において 10 分先のメトリクスしか送れないという制約への対処です。

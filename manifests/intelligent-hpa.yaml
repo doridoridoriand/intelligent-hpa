@@ -1,3 +1,11 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  labels:
+    control-plane: controller-manager
+    system: ihpa
+  name: kube-system
+---
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
@@ -80,6 +88,7 @@ spec:
                   datapoints.
                 properties:
                   aggregation:
+                    default: sum
                     description: 'Aggregation is the aggregation function used when
                       querying metrics. Valid values are: sum, min, max, count, avg.'
                     enum:
@@ -346,6 +355,7 @@ spec:
                 description: Provider is a metricProvider for fetching target metric.
                 properties:
                   aggregation:
+                    default: sum
                     description: 'Aggregation is the aggregation function used when
                       querying metrics. Valid values are: sum, min, max, count, avg.'
                     enum:
@@ -7987,6 +7997,7 @@ spec:
                 description: Provider is a metricProvider for fetching target metric.
                 properties:
                   aggregation:
+                    default: sum
                     description: 'Aggregation is the aggregation function used when
                       querying metrics. Valid values are: sum, min, max, count, avg.'
                     enum:
@@ -9520,6 +9531,7 @@ spec:
                   datapoints.
                 properties:
                   aggregation:
+                    default: sum
                     description: 'Aggregation is the aggregation function used when
                       querying metrics. Valid values are: sum, min, max, count, avg.'
                     enum:
@@ -10147,6 +10159,7 @@ spec:
                   datapoints.
                 properties:
                   aggregation:
+                    default: sum
                     description: 'Aggregation is the aggregation function used when
                       querying metrics. Valid values are: sum, min, max, count, avg.'
                     enum:
@@ -10224,6 +10237,189 @@ spec:
                           querying metrics.
                         type: string
                     type: object
+                type: object
+              scaleBackend:
+                description: ScaleBackend specifies which autoscaling backend IHPA
+                  manages. When omitted, IHPA manages a HorizontalPodAutoscaler.
+                properties:
+                  keda:
+                    description: KEDA specifies KEDA ScaledObject configuration.
+                    properties:
+                      advanced:
+                        description: Advanced specifies advanced KEDA ScaledObject
+                          settings.
+                        properties:
+                          horizontalPodAutoscalerConfig:
+                            description: HorizontalPodAutoscalerConfig specifies HPA
+                              options used by KEDA.
+                            properties:
+                              behavior:
+                                description: Behavior is copied to the HPA behavior
+                                  field created by KEDA. This is intentionally raw
+                                  because the repository still depends on Kubernetes
+                                  v0.17, whose autoscaling/v2beta2 API does not include
+                                  the behavior type.
+                                type: object
+                                x-kubernetes-preserve-unknown-fields: true
+                              name:
+                                description: Name is the name of the HPA resource
+                                  KEDA creates.
+                                type: string
+                            type: object
+                          restoreToOriginalReplicaCount:
+                            description: RestoreToOriginalReplicaCount controls whether
+                              the target returns to its original replica count after
+                              the ScaledObject is deleted.
+                            type: boolean
+                          scalingModifiers:
+                            description: ScalingModifiers specifies KEDA composite
+                              metric scaling settings.
+                            properties:
+                              activationTarget:
+                                description: ActivationTarget defines the composed
+                                  metric activation target value.
+                                type: string
+                              formula:
+                                description: Formula defines the expression for composing
+                                  trigger values.
+                                type: string
+                              metricType:
+                                description: MetricType defines the metric target
+                                  type for the composed metric.
+                                enum:
+                                - AverageValue
+                                - Value
+                                type: string
+                              target:
+                                description: Target defines the composed metric target
+                                  value.
+                                type: string
+                            type: object
+                        type: object
+                      annotations:
+                        additionalProperties:
+                          type: string
+                        description: Annotations are copied to the generated ScaledObject.
+                        type: object
+                      cooldownPeriod:
+                        description: CooldownPeriod is the period in seconds to wait
+                          before scaling back to idle/min replicas.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      envSourceContainerName:
+                        description: EnvSourceContainerName is copied to ScaledObject
+                          spec.scaleTargetRef.envSourceContainerName.
+                        type: string
+                      fallback:
+                        description: Fallback specifies fallback replicas when scalers
+                          fail.
+                        properties:
+                          behavior:
+                            description: Behavior is the fallback behavior.
+                            enum:
+                            - static
+                            - currentReplicas
+                            - currentReplicasIfHigher
+                            - currentReplicasIfLower
+                            - scalingModifiers
+                            type: string
+                          failureThreshold:
+                            description: FailureThreshold is the number of consecutive
+                              failures before fallback is applied.
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          replicas:
+                            description: Replicas is the fallback replica count.
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        required:
+                        - failureThreshold
+                        - replicas
+                        type: object
+                      idleReplicaCount:
+                        description: IdleReplicaCount is the replica count KEDA scales
+                          down to when triggers are inactive.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      initialCooldownPeriod:
+                        description: InitialCooldownPeriod is the delay in seconds
+                          before cooldown starts after ScaledObject creation.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                      labels:
+                        additionalProperties:
+                          type: string
+                        description: Labels are copied to the generated ScaledObject.
+                        type: object
+                      pollingInterval:
+                        description: PollingInterval is the interval in seconds to
+                          check each trigger.
+                        format: int32
+                        minimum: 1
+                        type: integer
+                      triggers:
+                        description: Triggers are copied to the generated ScaledObject.
+                        items:
+                          description: KEDATriggerSpec defines a KEDA trigger.
+                          properties:
+                            authenticationRef:
+                              description: AuthenticationRef references a KEDA TriggerAuthentication
+                                or ClusterTriggerAuthentication.
+                              properties:
+                                kind:
+                                  description: Kind is the authentication resource
+                                    kind.
+                                  enum:
+                                  - TriggerAuthentication
+                                  - ClusterTriggerAuthentication
+                                  type: string
+                                name:
+                                  description: Name is the TriggerAuthentication or
+                                    ClusterTriggerAuthentication name.
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            metadata:
+                              additionalProperties:
+                                type: string
+                              description: Metadata is scaler-specific trigger metadata.
+                              type: object
+                            metricType:
+                              description: MetricType is the HPA metric target type
+                                KEDA exposes for this trigger.
+                              enum:
+                              - Utilization
+                              - AverageValue
+                              - Value
+                              type: string
+                            name:
+                              description: Name is the optional trigger name.
+                              type: string
+                            type:
+                              description: Type is the KEDA scaler type.
+                              type: string
+                            useCachedMetrics:
+                              description: UseCachedMetrics controls KEDA trigger
+                                metric caching.
+                              type: boolean
+                          required:
+                          - type
+                          type: object
+                        type: array
+                    type: object
+                  type:
+                    default: HPA
+                    description: Type is the autoscaling backend type.
+                    enum:
+                    - HPA
+                    - KEDA
+                    type: string
                 type: object
               template:
                 description: Specifies the horizontalPodAutoscaler(v2beta2) that will
@@ -13514,6 +13710,24 @@ rules:
   - patch
   - update
 - apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
+  - watch
+- apiGroups:
+  - keda.sh
+  resources:
+  - scaledobjects/status
+  verbs:
+  - get
+- apiGroups:
   - rbac.authorization.k8s.io
   resources:
   - rolebindings
@@ -13647,7 +13861,7 @@ spec:
         - --upstream=http://127.0.0.1:8080/
         - --logtostderr=true
         - --v=10
-        image: quay.io/brancz/kube-rbac-proxy:v0.18.0
+        image: gcr.io/kubebuilder/kube-rbac-proxy:v0.4.1
         name: kube-rbac-proxy
         ports:
         - containerPort: 8443

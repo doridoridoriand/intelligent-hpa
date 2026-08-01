@@ -57,6 +57,10 @@ metricProvider:
 - `url`: メトリクスのクエリに使用するPrometheusサーバーのURL
 - `pushgatewayUrl`: 予測メトリクスの送信に使用するPrometheus PushgatewayのURL
 
+### KEDA
+
+KEDA モードを使う場合は、`spec.scaleBackend.type: KEDA` の IHPA を作成する前に KEDA Operator と `keda.sh/v1alpha1` の `ScaledObject` CRD をクラスタにインストールしてください。
+
 ## Usage
 
 Intelligent HPA のマニフェストについて説明します。
@@ -80,6 +84,14 @@ Intelligent HPA のマニフェストについて説明します。
     - `aggregation`
         - メトリクスのクエリ時に使用する集計関数を指定します
         - 許容値: `sum`, `min`, `max`, `count`, `avg` (default: `sum`)
+- `scaleBackend`
+    - IHPA が管理するスケーリングバックエンドを指定します
+    - `type`
+        - `HPA`: HorizontalPodAutoscaler を直接生成します (default)
+        - `KEDA`: KEDA `ScaledObject` を生成します
+    - `keda`
+        - `envSourceContainerName`, `pollingInterval`, `cooldownPeriod`, `fallback`, `advanced`, `triggers` などの ScaledObject 設定を記述します
+        - KEDA モードでは `triggers` をKEDAネイティブ定義として明示してください
 - `template`
     - HPA のマニフェストを記述します
     - HPA から移行する場合はそのままここにコピーしてください
@@ -166,6 +178,8 @@ spec:
           imagePullSecrets:
           - name: pull-secret
 ```
+
+KEDA モードを使う場合は `spec.scaleBackend.type: KEDA` を指定し、`spec.scaleBackend.keda.triggers` にKEDAのtriggerを記述します。IHPAはKEDAモードでもFittingJobとEstimatorを生成しますが、KEDA triggerのmetadataや認証はscalerごとに異なるため、HPAのmetricsから自動推測しません。詳細は [docs/architecture.md](./docs/architecture.md) と `ihpa-controller/config/samples/ihpa_keda_v1beta2.yaml` を参照してください。
 
 Apply したあと、該当の HPA を describe することでメトリクスの状況がわかります (デフォルトでは v1 の HPA が見えてしまうため `kubectl describe hpa.v2beta2.autoscaling xxx` のようにして確認する必要があります)。`ake.ihpa` で始まるメトリクス名が IHPA で予測しているメトリクス名になります。メトリクスによってはプロバイダのスケール値によっては異質な値になりますが問題ありません (HPA へメトリクスが渡される際にプロバイダのスケール値が考慮されない問題への対処です)。
 

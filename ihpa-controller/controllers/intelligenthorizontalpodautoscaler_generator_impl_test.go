@@ -477,6 +477,149 @@ func TestHorizontalPodAutoscalerResource(t *testing.T) {
 	}
 }
 
+func TestScaledObjectResource(t *testing.T) {
+	sample1, _ := testIHPAGeneratorSample(t)
+	pollingInterval := int32(30)
+	cooldownPeriod := int32(300)
+	initialCooldownPeriod := int32(60)
+	idleReplicaCount := int32(0)
+	restoreToOriginalReplicaCount := true
+	useCachedMetrics := true
+	sample1.ihpa.Spec.HorizontalPodAutoscalerTemplate.Spec.MaxReplicas = 8
+	sample1.ihpa.Spec.ScaleBackend = ihpav1beta2.ScaleBackendSpec{
+		Type: ihpav1beta2.ScaleBackendTypeKEDA,
+		KEDA: &ihpav1beta2.KEDAScaleBackendSpec{
+			Labels: map[string]string{
+				"app": "nginx",
+			},
+			Annotations: map[string]string{
+				"scaledobject.keda.sh/transfer-hpa-ownership": "true",
+			},
+			EnvSourceContainerName: "nginx",
+			PollingInterval:        &pollingInterval,
+			CooldownPeriod:         &cooldownPeriod,
+			InitialCooldownPeriod:  &initialCooldownPeriod,
+			IdleReplicaCount:       &idleReplicaCount,
+			Fallback:               &ihpav1beta2.KEDAFallbackSpec{FailureThreshold: 3, Replicas: 2, Behavior: "static"},
+			Advanced: &ihpav1beta2.KEDAAdvancedSpec{
+				RestoreToOriginalReplicaCount: &restoreToOriginalReplicaCount,
+				HorizontalPodAutoscalerConfig: &ihpav1beta2.KEDAHorizontalPodAutoscalerConfigSpec{
+					Name: "ihpa-sample1-keda-hpa",
+				},
+				ScalingModifiers: &ihpav1beta2.KEDAScalingModifiersSpec{
+					Target:     "1",
+					MetricType: "AverageValue",
+					Formula:    "requests",
+				},
+			},
+			Triggers: []ihpav1beta2.KEDATriggerSpec{
+				{
+					Type:       "prometheus",
+					Name:       "requests",
+					MetricType: "AverageValue",
+					Metadata: map[string]string{
+						"serverAddress": "http://prometheus.default.svc:9090",
+						"query":         "sum(rate(nginx_http_requests_total[1m]))",
+						"threshold":     "10",
+					},
+					AuthenticationRef: &ihpav1beta2.KEDAAuthenticationRef{
+						Name: "prometheus-trigger-auth",
+						Kind: "TriggerAuthentication",
+					},
+					UseCachedMetrics: &useCachedMetrics,
+				},
+			},
+		},
+	}
+
+	got, err := sample1.ScaledObjectResource()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if got.GetAPIVersion() != "keda.sh/v1alpha1" {
+		t.Fatalf("apiVersion mismatch: got=%s", got.GetAPIVersion())
+	}
+	if got.GetKind() != "ScaledObject" {
+		t.Fatalf("kind mismatch: got=%s", got.GetKind())
+	}
+	if got.GetName() != "ihpa-sample1" || got.GetNamespace() != "default" {
+		t.Fatalf("metadata mismatch: got=%s/%s", got.GetNamespace(), got.GetName())
+	}
+	if !reflect.DeepEqual(got.GetLabels(), map[string]string{"app": "nginx"}) {
+		t.Fatalf("labels mismatch: got=%#v", got.GetLabels())
+	}
+	if !reflect.DeepEqual(got.GetAnnotations(), map[string]string{"scaledobject.keda.sh/transfer-hpa-ownership": "true"}) {
+		t.Fatalf("annotations mismatch: got=%#v", got.GetAnnotations())
+	}
+	if len(got.GetOwnerReferences()) != 1 || got.GetOwnerReferences()[0].Name != "sample1" {
+		t.Fatalf("owner references mismatch: got=%#v", got.GetOwnerReferences())
+	}
+
+	expectedSpec := map[string]interface{}{
+		"scaleTargetRef": map[string]interface{}{
+			"apiVersion":             "apps/v1",
+			"kind":                   "Deployment",
+			"name":                   "nginx",
+			"envSourceContainerName": "nginx",
+		},
+		"minReplicaCount":       int64(3),
+		"maxReplicaCount":       int64(8),
+		"pollingInterval":       int64(30),
+		"cooldownPeriod":        int64(300),
+		"initialCooldownPeriod": int64(60),
+		"idleReplicaCount":      int64(0),
+		"fallback": map[string]interface{}{
+			"failureThreshold": int64(3),
+			"replicas":         int64(2),
+			"behavior":         "static",
+		},
+		"advanced": map[string]interface{}{
+			"restoreToOriginalReplicaCount": true,
+			"horizontalPodAutoscalerConfig": map[string]interface{}{
+				"name": "ihpa-sample1-keda-hpa",
+			},
+			"scalingModifiers": map[string]interface{}{
+				"target":     "1",
+				"metricType": "AverageValue",
+				"formula":    "requests",
+			},
+		},
+		"triggers": []interface{}{
+			map[string]interface{}{
+				"type":       "prometheus",
+				"name":       "requests",
+				"metricType": "AverageValue",
+				"metadata": map[string]interface{}{
+					"serverAddress": "http://prometheus.default.svc:9090",
+					"query":         "sum(rate(nginx_http_requests_total[1m]))",
+					"threshold":     "10",
+				},
+				"authenticationRef": map[string]interface{}{
+					"name": "prometheus-trigger-auth",
+					"kind": "TriggerAuthentication",
+				},
+				"useCachedMetrics": true,
+			},
+		},
+	}
+	if !reflect.DeepEqual(got.Object["spec"], expectedSpec) {
+		t.Fatalf("scaledobject spec mismatch\ngot=%#v\nexp=%#v", got.Object["spec"], expectedSpec)
+	}
+}
+
+func TestScaledObjectResourceRequiresTriggers(t *testing.T) {
+	sample1, _ := testIHPAGeneratorSample(t)
+	sample1.ihpa.Spec.ScaleBackend = ihpav1beta2.ScaleBackendSpec{
+		Type: ihpav1beta2.ScaleBackendTypeKEDA,
+		KEDA: &ihpav1beta2.KEDAScaleBackendSpec{},
+	}
+
+	if _, err := sample1.ScaledObjectResource(); err == nil {
+		t.Fatal("expected error but got nil")
+	}
+}
+
 func TestFittingJobResources(t *testing.T) {
 	sample1, sample2 := testIHPAGeneratorSample(t)
 	tests := []struct {

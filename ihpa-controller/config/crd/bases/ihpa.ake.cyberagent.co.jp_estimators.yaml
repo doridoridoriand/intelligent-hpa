@@ -79,6 +79,17 @@ spec:
                 description: MetricProvider is data source and destination of metrics
                   datapoints.
                 properties:
+                  aggregation:
+                    default: sum
+                    description: 'Aggregation is the aggregation function used when
+                      querying metrics. Valid values are: sum, min, max, count, avg.'
+                    enum:
+                    - sum
+                    - min
+                    - max
+                    - count
+                    - avg
+                    type: string
                   datadog:
                     description: DatadogProviderSource defines parameters for accessing
                       Datadog.
@@ -133,16 +144,6 @@ spec:
                     type: object
                   name:
                     description: Name is a name of provider
-                    type: string
-                  aggregation:
-                    description: "Aggregation is the aggregation function used when
-                      querying metrics. Valid values are: sum, min, max, count, avg."
-                    enum:
-                    - sum
-                    - min
-                    - max
-                    - count
-                    - avg
                     type: string
                   prometheus:
                     description: PrometheusProviderSource defines parameters for accessing

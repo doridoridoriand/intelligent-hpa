@@ -23,6 +23,7 @@ import (
 
 	ihpav1beta2 "github.com/cyberagent-oss/intelligent-hpa/ihpa-controller/api/v1beta2"
 	"github.com/go-logr/logr"
+	autoscalingv2beta2 "k8s.io/api/autoscaling/v2beta2"
 	corev1 "k8s.io/api/core/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -66,6 +67,8 @@ type IntelligentHorizontalPodAutoscalerReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=namespaces,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=apps,resources=deployments,verbs=get;list;watch
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=keda.sh,resources=scaledobjects/status,verbs=get
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=roles,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=rbac.authorization.k8s.io,resources=rolebindings,verbs=get;list;watch;create;update;patch;delete
 
@@ -92,51 +95,36 @@ func (r *IntelligentHorizontalPodAutoscalerReconciler) Reconcile(req ctrl.Reques
 		return ctrl.Result{}, fmt.Errorf("failed to create ihpa manager: %w", err)
 	}
 
-	// * create/update hpa resource
-	hpaResource, err := g.HorizontalPodAutoscalerResource()
-	if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to generate hpa resource: %w", err)
+	switch scaleBackendType(&ihpa) {
+	case ihpav1beta2.ScaleBackendTypeHPA:
+		hpaResource, err := g.HorizontalPodAutoscalerResource()
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to generate hpa resource: %w", err)
+		}
+		if err := r.deleteScaledObject(ctx, hpaResource.GetNamespace(), hpaResource.GetName()); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to delete scaledobject for hpa backend: %w", err)
+		}
+		hpaUnstructured, err := r.applyHorizontalPodAutoscaler(ctx, log, hpaResource)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		log.V(ResourceMessageLogLevel).Info("successed to create/update hpa", "kind", hpaUnstructured.GetObjectKind().GroupVersionKind(), "name", hpaUnstructured.GetName())
+	case ihpav1beta2.ScaleBackendTypeKEDA:
+		scaledObjectResource, err := g.ScaledObjectResource()
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to generate scaledobject resource: %w", err)
+		}
+		if err := r.deleteHorizontalPodAutoscaler(ctx, scaledObjectResource.GetNamespace(), scaledObjectResource.GetName()); err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to delete hpa for keda backend: %w", err)
+		}
+		scaledObject, err := r.applyScaledObject(ctx, log, scaledObjectResource)
+		if err != nil {
+			return ctrl.Result{}, err
+		}
+		log.V(ResourceMessageLogLevel).Info("successed to create/update scaledobject", "kind", scaledObject.GetObjectKind().GroupVersionKind(), "name", scaledObject.GetName())
+	default:
+		return ctrl.Result{}, fmt.Errorf("unsupported scaleBackend.type: %s", ihpa.Spec.ScaleBackend.Type)
 	}
-
-	// Convert v2beta2 HPA to unstructured for autoscaling/v2 compatibility
-	// (K8s 1.25+ removed autoscaling/v2beta2, so we use autoscaling/v2)
-	hpaUnstructured := &unstructured.Unstructured{}
-	hpaUnstructured.SetGroupVersionKind(schema.GroupVersionKind{
-		Group:   "autoscaling",
-		Version: "v2",
-		Kind:    "HorizontalPodAutoscaler",
-	})
-	hpaUnstructured.SetNamespace(hpaResource.GetNamespace())
-	hpaUnstructured.SetName(hpaResource.GetName())
-
-	if err := r.Get(ctx, types.NamespacedName{Namespace: hpaResource.GetNamespace(), Name: hpaResource.GetName()}, hpaUnstructured); apierrors.IsNotFound(err) {
-		log.V(ResourceMessageLogLevel).Info("initialize hpa", "name", hpaResource.GetName())
-		objMap, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(hpaResource)
-		if convErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to convert hpa to unstructured: %w", convErr)
-		}
-		hpaUnstructured = &unstructured.Unstructured{Object: objMap}
-		hpaUnstructured.SetGroupVersionKind(schema.GroupVersionKind{
-			Group:   "autoscaling",
-			Version: "v2",
-			Kind:    "HorizontalPodAutoscaler",
-		})
-		if err := r.Create(ctx, hpaUnstructured); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to create hpa: %w", err)
-		}
-	} else if err != nil {
-		return ctrl.Result{}, fmt.Errorf("failed to get hpa: %w", err)
-	} else {
-		specMap, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(&hpaResource.Spec)
-		if convErr != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to convert hpa spec to unstructured: %w", convErr)
-		}
-		hpaUnstructured.Object["spec"] = specMap
-		if err := r.Update(ctx, hpaUnstructured); err != nil {
-			return ctrl.Result{}, fmt.Errorf("failed to update hpa: %w", err)
-		}
-	}
-	log.V(ResourceMessageLogLevel).Info("successed to create/update hpa", "kind", hpaUnstructured.GetObjectKind().GroupVersionKind(), "name", hpaUnstructured.GetName())
 
 	// * create rbac resources
 	saResource, roleResource, roleBindingResource, err := g.RBACResources()
@@ -309,6 +297,122 @@ func (r *IntelligentHorizontalPodAutoscalerReconciler) Reconcile(req ctrl.Reques
 	log.V(ResourceMessageLogLevel).Info("successed to create/update status configmap", "name", statusCM.GetName())
 
 	return ctrl.Result{}, nil
+}
+
+func scaleBackendType(ihpa *ihpav1beta2.IntelligentHorizontalPodAutoscaler) ihpav1beta2.ScaleBackendType {
+	if ihpa.Spec.ScaleBackend.Type == "" {
+		return ihpav1beta2.ScaleBackendTypeHPA
+	}
+	return ihpa.Spec.ScaleBackend.Type
+}
+
+func (r *IntelligentHorizontalPodAutoscalerReconciler) applyHorizontalPodAutoscaler(
+	ctx context.Context,
+	log logr.Logger,
+	hpaResource *autoscalingv2beta2.HorizontalPodAutoscaler,
+) (*unstructured.Unstructured, error) {
+	hpaUnstructured := newHorizontalPodAutoscalerUnstructured(hpaResource.GetNamespace(), hpaResource.GetName())
+
+	if err := r.Get(ctx, types.NamespacedName{Namespace: hpaResource.GetNamespace(), Name: hpaResource.GetName()}, hpaUnstructured); apierrors.IsNotFound(err) {
+		log.V(ResourceMessageLogLevel).Info("initialize hpa", "name", hpaResource.GetName())
+		objMap, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(hpaResource)
+		if convErr != nil {
+			return nil, fmt.Errorf("failed to convert hpa to unstructured: %w", convErr)
+		}
+		hpaUnstructured = &unstructured.Unstructured{Object: objMap}
+		hpaUnstructured.SetGroupVersionKind(horizontalPodAutoscalerGVK())
+		if err := r.Create(ctx, hpaUnstructured); err != nil {
+			return nil, fmt.Errorf("failed to create hpa: %w", err)
+		}
+		return hpaUnstructured, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to get hpa: %w", err)
+	}
+
+	specMap, convErr := runtime.DefaultUnstructuredConverter.ToUnstructured(&hpaResource.Spec)
+	if convErr != nil {
+		return nil, fmt.Errorf("failed to convert hpa spec to unstructured: %w", convErr)
+	}
+	hpaUnstructured.Object["spec"] = specMap
+	if err := r.Update(ctx, hpaUnstructured); err != nil {
+		return nil, fmt.Errorf("failed to update hpa: %w", err)
+	}
+	return hpaUnstructured, nil
+}
+
+func (r *IntelligentHorizontalPodAutoscalerReconciler) applyScaledObject(
+	ctx context.Context,
+	log logr.Logger,
+	scaledObjectResource *unstructured.Unstructured,
+) (*unstructured.Unstructured, error) {
+	scaledObject := newScaledObjectUnstructured(scaledObjectResource.GetNamespace(), scaledObjectResource.GetName())
+
+	if err := r.Get(ctx, types.NamespacedName{Namespace: scaledObjectResource.GetNamespace(), Name: scaledObjectResource.GetName()}, scaledObject); apierrors.IsNotFound(err) {
+		log.V(ResourceMessageLogLevel).Info("initialize scaledobject", "name", scaledObjectResource.GetName())
+		scaledObject = scaledObjectResource.DeepCopy()
+		if err := r.Create(ctx, scaledObject); err != nil {
+			return nil, fmt.Errorf("failed to create scaledobject: %w", err)
+		}
+		return scaledObject, nil
+	} else if err != nil {
+		return nil, fmt.Errorf("failed to get scaledobject: %w", err)
+	}
+
+	scaledObject.SetLabels(scaledObjectResource.GetLabels())
+	scaledObject.SetAnnotations(scaledObjectResource.GetAnnotations())
+	scaledObject.Object["spec"] = scaledObjectResource.Object["spec"]
+	if err := r.Update(ctx, scaledObject); err != nil {
+		return nil, fmt.Errorf("failed to update scaledobject: %w", err)
+	}
+	return scaledObject, nil
+}
+
+func (r *IntelligentHorizontalPodAutoscalerReconciler) deleteHorizontalPodAutoscaler(ctx context.Context, namespace, name string) error {
+	hpa := newHorizontalPodAutoscalerUnstructured(namespace, name)
+	if err := r.Delete(ctx, hpa); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
+}
+
+func (r *IntelligentHorizontalPodAutoscalerReconciler) deleteScaledObject(ctx context.Context, namespace, name string) error {
+	scaledObject := newScaledObjectUnstructured(namespace, name)
+	if err := r.Delete(ctx, scaledObject); err != nil {
+		return client.IgnoreNotFound(err)
+	}
+	return nil
+}
+
+func newHorizontalPodAutoscalerUnstructured(namespace, name string) *unstructured.Unstructured {
+	hpa := &unstructured.Unstructured{}
+	hpa.SetGroupVersionKind(horizontalPodAutoscalerGVK())
+	hpa.SetNamespace(namespace)
+	hpa.SetName(name)
+	return hpa
+}
+
+func newScaledObjectUnstructured(namespace, name string) *unstructured.Unstructured {
+	scaledObject := &unstructured.Unstructured{}
+	scaledObject.SetGroupVersionKind(scaledObjectGVK())
+	scaledObject.SetNamespace(namespace)
+	scaledObject.SetName(name)
+	return scaledObject
+}
+
+func horizontalPodAutoscalerGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   "autoscaling",
+		Version: "v2",
+		Kind:    "HorizontalPodAutoscaler",
+	}
+}
+
+func scaledObjectGVK() schema.GroupVersionKind {
+	return schema.GroupVersionKind{
+		Group:   "keda.sh",
+		Version: "v1alpha1",
+		Kind:    "ScaledObject",
+	}
 }
 
 func (r *IntelligentHorizontalPodAutoscalerReconciler) SetupWithManager(mgr ctrl.Manager) error {

@@ -10,10 +10,11 @@ IntelligentHorizontalPodAutoscalerReconciler（IHPA Controller）は、IHPAカ�
 
 IHPA Controllerは以下のリソースのライフサイクルを管理します：
 
-1. **HorizontalPodAutoscaler (HPA)** - 標準のHPAに予測メトリクスを追加
-2. **FittingJob** - 各メトリクスに対する機械学習ジョブ
-3. **Estimator** - 各メトリクスに対する予測値送信リソース
-4. **RBAC Resources** - ServiceAccount、Role、RoleBinding
+1. **HorizontalPodAutoscaler (HPA)** - `scaleBackend.type: HPA` 時に標準のHPAへ予測メトリクスを追加
+2. **ScaledObject (KEDA)** - `scaleBackend.type: KEDA` 時にKEDA ScaledObjectを生成
+3. **FittingJob** - 各メトリクスに対する機械学習ジョブ
+4. **Estimator** - 各メトリクスに対する予測値送信リソース
+5. **RBAC Resources** - ServiceAccount、Role、RoleBinding
 
 ### コンポーネント構成
 
@@ -54,7 +55,11 @@ g, err := NewIntelligentHorizontalPodAutoscalerGenerator(&ihpa, r, ctx)
 
 **検証対象要件:** 要件 1.1（リソース生成の基盤）
 
-### 3. HPA生成・更新フェーズ
+### 3. Scale Backend生成・更新フェーズ
+
+`spec.scaleBackend.type` によって生成するスケーリングリソースを切り替えます。未指定の場合は `HPA` として扱います。
+
+#### HPAモード
 
 ```go
 hpaResource, err := g.HorizontalPodAutoscalerResource()
@@ -85,8 +90,40 @@ hpaResource, err := g.HorizontalPodAutoscalerResource()
 **リソース作成/更新:**
 - 存在しない場合: `r.Create(ctx, hpa)`
 - 存在する場合: Specを更新して `r.Update(ctx, hpa)`
+- 同名のIHPA生成 ScaledObject が存在する場合は削除
 
 **検証対象要件:** 要件 1.1, 1.2, 1.5（HPA生成と複数メトリクスサポート）
+
+#### KEDAモード
+
+```go
+scaledObjectResource, err := g.ScaledObjectResource()
+```
+
+**ScaledObject生成ロジック:**
+
+1. **ScaleTargetの反映**
+   - `template.spec.scaleTargetRef` を `spec.scaleTargetRef` にコピー
+   - `template.spec.minReplicas` を `spec.minReplicaCount` に変換
+   - `template.spec.maxReplicas` を `spec.maxReplicaCount` に変換
+
+2. **KEDA設定の反映**
+   - `scaleBackend.keda.labels`, `annotations` を ScaledObject metadata にコピー
+   - `envSourceContainerName` を `scaleTargetRef.envSourceContainerName` にコピー
+   - `pollingInterval`, `cooldownPeriod`, `initialCooldownPeriod`, `idleReplicaCount` をコピー
+   - `fallback`, `advanced`, `triggers` をKEDA仕様に合わせてコピー
+
+3. **Triggerの扱い**
+   - KEDA trigger は scaler ごとにmetadataと認証方式が異なるため、IHPAのHPA風 `metrics` からは自動生成しない
+   - `scaleBackend.keda.triggers` は1件以上必須
+   - 予測メトリクスをKEDAで評価したい場合は、ユーザーが予測メトリクス用triggerを明示する
+
+**リソース作成/更新:**
+- 存在しない場合: `r.Create(ctx, scaledObject)`
+- 存在する場合: metadata と Spec を更新して `r.Update(ctx, scaledObject)`
+- 同名のIHPA生成 HPA が存在する場合は削除
+
+**検証対象要件:** 要件 1.1, 1.2, 1.5（KEDA ScaledObject生成と複数メトリクスサポート）
 
 ### 4. RBAC リソース生成フェーズ
 
@@ -108,6 +145,10 @@ saResource, roleResource, roleBindingResource, err := g.RBACResources()
 3. **RoleBinding:**
    - 名前: `ihpa-<ihpa_name>`
    - ServiceAccountとRoleをバインド
+
+**Controller manager RBAC:**
+- HPAモードでは `autoscaling/horizontalpodautoscalers` の管理権限が必要
+- KEDAモードでは `keda.sh/scaledobjects` の `get`, `list`, `watch`, `create`, `update`, `patch`, `delete` 権限が必要
 
 **リソース作成:**
 - 各リソースは存在しない場合のみ作成（`apierrors.IsNotFound(err)`でチェック）
@@ -319,6 +360,39 @@ metricIdentifier.Selector = &metav1.LabelSelector{MatchLabels: g.uniqueMetricFil
     "kube_<kind>": "<ScaleTarget name>"
 }
 ```
+
+### ScaledObject生成の詳細
+
+**ScaledObjectResource メソッド:**
+
+このメソッドは `scaleBackend.keda` から `keda.sh/v1alpha1` の ScaledObject を生成します。
+
+**metadataの生成:**
+
+- 名前: `ihpa-<ihpa_name>`
+- 名前空間: IHPAと同じ名前空間
+- `scaleBackend.keda.labels` と `scaleBackend.keda.annotations` をコピー
+- OwnerReference をIHPAに向けて設定
+
+**specの生成:**
+
+```yaml
+spec:
+  scaleTargetRef:
+    apiVersion: <template.spec.scaleTargetRef.apiVersion>
+    kind: <template.spec.scaleTargetRef.kind>
+    name: <template.spec.scaleTargetRef.name>
+    envSourceContainerName: <scaleBackend.keda.envSourceContainerName>
+  minReplicaCount: <template.spec.minReplicas>
+  maxReplicaCount: <template.spec.maxReplicas>
+  triggers: <scaleBackend.keda.triggers>
+```
+
+`envSourceContainerName`, `pollingInterval`, `cooldownPeriod`, `initialCooldownPeriod`, `idleReplicaCount`, `fallback`, `advanced` は指定された場合のみ出力されます。`advanced.horizontalPodAutoscalerConfig.behavior` はKubernetes v0.17の型に存在しないため、RawExtensionとして受け取り、ScaledObjectへJSONとしてコピーします。
+
+**Triggerの責務境界:**
+
+KEDAのtriggerは `type` ごとにmetadataと認証方式が異なります。IHPA ControllerはKEDA triggerを自動推測せず、`scaleBackend.keda.triggers` をそのままScaledObjectへ反映します。FittingJob/EstimatorはKEDAモードでも生成されるため、予測メトリクス自体は従来通りMetricProviderに送信されます。
 
 ### FittingJob生成の詳細
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/md5"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"sort"
@@ -17,6 +18,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	amtypes "k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
@@ -145,6 +147,171 @@ func (g *ihpaGeneratorImpl) HorizontalPodAutoscalerResource() (*autoscalingv2bet
 	addOwnerReference(&(g.ihpa.TypeMeta), &(g.ihpa.ObjectMeta), &hpa)
 
 	return &hpa, nil
+}
+
+// ScaledObjectResource returns a KEDA ScaledObject resource generated from IHPA.
+func (g *ihpaGeneratorImpl) ScaledObjectResource() (*unstructured.Unstructured, error) {
+	keda := g.ihpa.Spec.ScaleBackend.KEDA
+	if keda == nil {
+		return nil, fmt.Errorf("scaleBackend.keda must be specified when scaleBackend.type is KEDA")
+	}
+	if len(keda.Triggers) == 0 {
+		return nil, fmt.Errorf("scaleBackend.keda.triggers must contain at least one trigger")
+	}
+
+	scaledObject := &unstructured.Unstructured{}
+	scaledObject.SetAPIVersion("keda.sh/v1alpha1")
+	scaledObject.SetKind("ScaledObject")
+	scaledObject.SetName(g.scaledObjectName())
+	scaledObject.SetNamespace(g.ihpa.GetNamespace())
+	if len(keda.Labels) != 0 {
+		scaledObject.SetLabels(copyStringMap(keda.Labels))
+	}
+	if len(keda.Annotations) != 0 {
+		scaledObject.SetAnnotations(copyStringMap(keda.Annotations))
+	}
+
+	scaleTarget := g.ihpa.Spec.HorizontalPodAutoscalerTemplate.Spec.ScaleTargetRef
+	scaleTargetRef := map[string]interface{}{
+		"apiVersion": scaleTarget.APIVersion,
+		"kind":       scaleTarget.Kind,
+		"name":       scaleTarget.Name,
+	}
+	if keda.EnvSourceContainerName != "" {
+		scaleTargetRef["envSourceContainerName"] = keda.EnvSourceContainerName
+	}
+	spec := map[string]interface{}{
+		"scaleTargetRef": scaleTargetRef,
+	}
+
+	if minReplicas := g.ihpa.Spec.HorizontalPodAutoscalerTemplate.Spec.MinReplicas; minReplicas != nil {
+		spec["minReplicaCount"] = int64(*minReplicas)
+	}
+	if maxReplicas := g.ihpa.Spec.HorizontalPodAutoscalerTemplate.Spec.MaxReplicas; maxReplicas != 0 {
+		spec["maxReplicaCount"] = int64(maxReplicas)
+	}
+	if keda.PollingInterval != nil {
+		spec["pollingInterval"] = int64(*keda.PollingInterval)
+	}
+	if keda.CooldownPeriod != nil {
+		spec["cooldownPeriod"] = int64(*keda.CooldownPeriod)
+	}
+	if keda.InitialCooldownPeriod != nil {
+		spec["initialCooldownPeriod"] = int64(*keda.InitialCooldownPeriod)
+	}
+	if keda.IdleReplicaCount != nil {
+		spec["idleReplicaCount"] = int64(*keda.IdleReplicaCount)
+	}
+	if keda.Fallback != nil {
+		fallback := map[string]interface{}{
+			"failureThreshold": int64(keda.Fallback.FailureThreshold),
+			"replicas":         int64(keda.Fallback.Replicas),
+		}
+		if keda.Fallback.Behavior != "" {
+			fallback["behavior"] = keda.Fallback.Behavior
+		}
+		spec["fallback"] = fallback
+	}
+	if keda.Advanced != nil {
+		advanced, err := kedaAdvancedToMap(keda.Advanced)
+		if err != nil {
+			return nil, err
+		}
+		if len(advanced) != 0 {
+			spec["advanced"] = advanced
+		}
+	}
+
+	triggers, err := kedaTriggersToSlice(keda.Triggers)
+	if err != nil {
+		return nil, err
+	}
+	spec["triggers"] = triggers
+	scaledObject.Object["spec"] = spec
+
+	addOwnerReference(&(g.ihpa.TypeMeta), &(g.ihpa.ObjectMeta), scaledObject)
+
+	return scaledObject, nil
+}
+
+func kedaAdvancedToMap(advanced *ihpav1beta2.KEDAAdvancedSpec) (map[string]interface{}, error) {
+	result := map[string]interface{}{}
+	if advanced.RestoreToOriginalReplicaCount != nil {
+		result["restoreToOriginalReplicaCount"] = *advanced.RestoreToOriginalReplicaCount
+	}
+	if advanced.HorizontalPodAutoscalerConfig != nil {
+		hpaConfig := map[string]interface{}{}
+		if advanced.HorizontalPodAutoscalerConfig.Name != "" {
+			hpaConfig["name"] = advanced.HorizontalPodAutoscalerConfig.Name
+		}
+		if advanced.HorizontalPodAutoscalerConfig.Behavior != nil {
+			var behavior interface{}
+			if len(advanced.HorizontalPodAutoscalerConfig.Behavior.Raw) != 0 {
+				if err := json.Unmarshal(advanced.HorizontalPodAutoscalerConfig.Behavior.Raw, &behavior); err != nil {
+					return nil, fmt.Errorf("failed to unmarshal keda hpa behavior: %w", err)
+				}
+				hpaConfig["behavior"] = behavior
+			}
+		}
+		if len(hpaConfig) != 0 {
+			result["horizontalPodAutoscalerConfig"] = hpaConfig
+		}
+	}
+	if advanced.ScalingModifiers != nil {
+		scalingModifiers := map[string]interface{}{}
+		if advanced.ScalingModifiers.Target != "" {
+			scalingModifiers["target"] = advanced.ScalingModifiers.Target
+		}
+		if advanced.ScalingModifiers.ActivationTarget != "" {
+			scalingModifiers["activationTarget"] = advanced.ScalingModifiers.ActivationTarget
+		}
+		if advanced.ScalingModifiers.MetricType != "" {
+			scalingModifiers["metricType"] = advanced.ScalingModifiers.MetricType
+		}
+		if advanced.ScalingModifiers.Formula != "" {
+			scalingModifiers["formula"] = advanced.ScalingModifiers.Formula
+		}
+		if len(scalingModifiers) != 0 {
+			result["scalingModifiers"] = scalingModifiers
+		}
+	}
+	return result, nil
+}
+
+func kedaTriggersToSlice(triggers []ihpav1beta2.KEDATriggerSpec) ([]interface{}, error) {
+	result := make([]interface{}, len(triggers))
+	for i := range triggers {
+		trigger := triggers[i]
+		if trigger.Type == "" {
+			return nil, fmt.Errorf("scaleBackend.keda.triggers[%d].type must be specified", i)
+		}
+		triggerMap := map[string]interface{}{
+			"type": trigger.Type,
+		}
+		if trigger.Name != "" {
+			triggerMap["name"] = trigger.Name
+		}
+		if trigger.MetricType != "" {
+			triggerMap["metricType"] = trigger.MetricType
+		}
+		if len(trigger.Metadata) != 0 {
+			triggerMap["metadata"] = stringMapToInterfaceMap(trigger.Metadata)
+		}
+		if trigger.AuthenticationRef != nil {
+			auth := map[string]interface{}{
+				"name": trigger.AuthenticationRef.Name,
+			}
+			if trigger.AuthenticationRef.Kind != "" {
+				auth["kind"] = trigger.AuthenticationRef.Kind
+			}
+			triggerMap["authenticationRef"] = auth
+		}
+		if trigger.UseCachedMetrics != nil {
+			triggerMap["useCachedMetrics"] = *trigger.UseCachedMetrics
+		}
+		result[i] = triggerMap
+	}
+	return result, nil
 }
 
 // generateForecastedMetricSpec returns external MetricSpec for forecasted value.
@@ -481,9 +648,9 @@ func (g *ihpaGeneratorImpl) StatusConfigMapResource() (*corev1.ConfigMap, error)
 	}
 
 	data := map[string]string{
-		"hpaName":        g.hpaName(),
+		"hpaName":         g.hpaName(),
 		"fittingJobNames": strings.Join(fittingJobNames, ","),
-		"estimatorNames": strings.Join(estimatorNames, ","),
+		"estimatorNames":  strings.Join(estimatorNames, ","),
 	}
 
 	cm := corev1.ConfigMap{
@@ -569,6 +736,9 @@ func (g *ihpaGeneratorImpl) ihpaString() string {
 
 func (g *ihpaGeneratorImpl) hpaName() string  { return g.ihpaString() }
 func (g *ihpaGeneratorImpl) rbacName() string { return g.ihpaString() }
+func (g *ihpaGeneratorImpl) scaledObjectName() string {
+	return g.ihpaString()
+}
 func (g *ihpaGeneratorImpl) statusConfigMapName() string {
 	return sanitizeForKubernetesResourceName(g.ihpaString() + "-status")
 }
@@ -582,4 +752,20 @@ func (g *ihpaGeneratorImpl) allConfigMapName() []string {
 		cmNames[i] = g.configMapName(&metrics[i])
 	}
 	return cmNames
+}
+
+func copyStringMap(src map[string]string) map[string]string {
+	dst := make(map[string]string, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
+}
+
+func stringMapToInterfaceMap(src map[string]string) map[string]interface{} {
+	dst := make(map[string]interface{}, len(src))
+	for k, v := range src {
+		dst[k] = v
+	}
+	return dst
 }

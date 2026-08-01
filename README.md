@@ -59,6 +59,10 @@ metricProvider:
 - `url`: Prometheus server URL for querying metrics
 - `pushgatewayUrl`: Prometheus Pushgateway URL for sending forecast metrics
 
+### KEDA
+
+KEDA mode requires KEDA Operator and the `keda.sh/v1alpha1` `ScaledObject` CRD to be installed in the cluster before applying an IHPA with `spec.scaleBackend.type: KEDA`.
+
 ## Usage
 
 IHPA manifest has some field below:
@@ -82,6 +86,14 @@ IHPA manifest has some field below:
     - `aggregation`
         - Aggregation function used when querying metrics
         - Allowable: `sum`, `min`, `max`, `count`, `avg` (default: `sum`)
+- `scaleBackend`
+    - Scaling backend managed by IHPA
+    - `type`
+        - `HPA`: generate a HorizontalPodAutoscaler directly (default)
+        - `KEDA`: generate a KEDA `ScaledObject`
+    - `keda`
+        - KEDA ScaledObject settings such as `envSourceContainerName`, `pollingInterval`, `cooldownPeriod`, `fallback`, `advanced`, and `triggers`
+        - `triggers` are KEDA-native definitions and must be specified explicitly in KEDA mode
 - `template`
     - Almost same template as HorizontalPodAutoscaler
     - You can copy/paste HPA manifests to this field
@@ -167,6 +179,8 @@ spec:
           imagePullSecrets:
           - name: pull-secret
 ```
+
+For KEDA mode, set `spec.scaleBackend.type: KEDA` and provide KEDA triggers under `spec.scaleBackend.keda.triggers`. IHPA still creates FittingJobs and Estimators, but KEDA trigger metadata and authentication are scaler-specific, so IHPA does not infer them from HPA metrics. See [docs/architecture.md](./docs/architecture.md) and `ihpa-controller/config/samples/ihpa_keda_v1beta2.yaml`.
 
 You can see metrics status by `kubectl describe hpa.v2beta2.autoscaling xxx`. A predictive metric has `ake.ihpa` prefix. The metric sometimes shows weird value but it is not problem. This is caused by workaround for issue that the HPA interprets the provider's values without scale unit information.
 
